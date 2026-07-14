@@ -1,0 +1,39 @@
+-------------Filtrare Utilizatori--------------------------
+
+Pentru ca scriptul de clonare să funcționeze corect în fundal, el trebuie să interacționeze direct cu nucleul și configurările sistemului de operare Linux. Mai jos sunt detaliate cele trei mari mecanisme pe care se bazează logica aplicației.
+
+În Linux, toate conturile de utilizatori sunt stocate în fișierul text /etc/passwd. Fiecare linie din acest fișier reprezintă un utilizator și conține detalii separate prin două puncte (:), cum ar fi: numele, folderul de Home și, cel mai important, UID-ul (User ID).
+
+Sistemul de operare nu face o distincție vizuală între un utilizator om și un serviciu de fundal (cum ar fi serviciul de bază de date, serverul web sau cel de imprimantă). Din acest motiv, Linux folosește o convenție numerică bazată pe UID:
+
+UID 0: Este rezervat exclusiv pentru super-utilizatorul root.
+
+UID 1 - 999: Sunt numere alocate automat utilizatorilor de sistem (servicii de fundal necesare pentru rularea OS-ului).
+
+UID >= 1000: Sunt numerele alocate conturilor reale de oameni (primul utilizator creat la instalarea Linux Mint va avea mereu UID 1000, următorul 1001 etc.).
+
+Pentru a nu clona procesele și serviciile interne de pe o mașină pe alta (ceea ce ar putea strica sistemul destinație), scriptul va parsa fișierul /etc/passwd folosind un filtru text (cum ar fi awk sau grep) care va extrage doar liniile unde câmpul UID este mai mare sau egal cu 1000. Doar acești utilizatori vor fi afișați în interfața grafică pentru clonare.
+
+----------------SSH si auth asimetrica(fara parola)-----------------
+
+Deoarece scriptul rulează pe calculatorul Sursă, el trebuie să poată citi date de pe calculatorul Destinație și să execute comenzi acolo (să creeze utilizatori, să instaleze pachete). Acest lucru se face prin protocolul securizat SSH (Secure Shell).
+
+În mod normal, SSH îți cere parola mașinii la distanță de fiecare dată când încerci să trimiți o comandă. Pentru un script automatizat, acest lucru este ineficient deoarece ar bloca execuția și ar cere utilizatorului să introducă parola de zeci de ori.
+Vom folosi criptografia asimetrică (pereche de chei publică/privată):
+
+    Cheia Privată: Rămâne pe Sursă și funcționează ca o „semnătură digitală” secretă.
+
+    Cheia Publică: Este copiată pe mașina Destinație în fișierul ~/.ssh/authorized_keys. Ea funcționează ca un lacăt.
+
+Odată ce cheia publică a fost copiată pe Destinație, cele două mașini virtuale vor realiza un „handshake” criptografic automat. Scriptul Bash va putea rula comenzi la distanță instantaneu, în mod complet securizat și silențios, fără nicio intervenție manuală din partea utilizatorului.
+
+-------------------RSYNC--------------------------
+
+rsync (Remote Sync) este cel mai puternic utilitar de transfer din Linux datorită a două mari caracteristici:
+
+Algoritmul Delta (Incremental): rsync analizează fișierele de pe Sursă și Destinație. Dacă un fișier de 1 GB are doar o modificare mică la final, el nu va retrimite tot fișierul prin rețea, ci va transfera doar diferențele. Acest lucru face ca scriptul de clonare să fie extrem de rapid la rulări succesive.
+
+Păstrarea Metadatelor: Fișierele din Linux au atașate permisiuni speciale (drepturi de citire, scriere, execuție - chmod) și proprietari (UID/GID - chown). Dacă folosești o copiere simplă, fișierele transferate pot deveni deținute de utilizatorul care rulează scriptul, blocând accesul utilizatorului de drept pe mașina nouă. rsync rulează cu flag-uri speciale (cum ar fi -a pentru arhivare) care asigură transferul intact al acestor drepturi.
+
+---------------------Zenity--------------------------
+Zenity este un utilitar nativ in Linux Mint care permite crearea de ferestre GTK+ din Bash. Nu necesita instalare.
