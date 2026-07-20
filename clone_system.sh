@@ -28,7 +28,7 @@ mkdir -p "$OUTPUT_DIR"
     echo "20"; echo "# Analiză utilizatori legitimi (UID >= 1000)..."
     awk -F: '$3 >= 1000 && $3 != 65534 {print $1 ":" $3 ":" $6}' /etc/passwd > "$OUTPUT_DIR/utilizatori_legitimi.txt"
 
-    echo "35"; echo "# Analiză securitate parole din /etc/shadow..."
+    echo "30"; echo "# Analiză securitate parole din /etc/shadow..."
     > "$OUTPUT_DIR/status_parole.txt"
     while IFS=: read -r user uid home; do
         SHADOW_LINE=$(sudo grep "^$user:" /etc/shadow)
@@ -36,10 +36,24 @@ mkdir -p "$OUTPUT_DIR"
         echo "$user:$PASSWORD_HASH" >> "$OUTPUT_DIR/status_parole.txt"
     done < "$OUTPUT_DIR/utilizatori_legitimi.txt"
 
-    echo "50"; echo "# Identificare pachete software (APT, Snap, Flatpak)..."
+    echo "45"; echo "# Identificare pachete software (APT)..."
     dpkg-query -f '${binary:Package}\n' -W > "$OUTPUT_DIR/pachete_sursa.txt"
     ssh "${DEST_USER}@${DEST_IP}" "dpkg-query -f '\${binary:Package}\n' -W" > "$OUTPUT_DIR/pachete_destinatie.txt"
     comm -23 <(sort "$OUTPUT_DIR/pachete_sursa.txt") <(sort "$OUTPUT_DIR/pachete_destinatie.txt") > "$OUTPUT_DIR/pachete_lipsa.txt"
+
+    # ----------------------------------------------------------------------
+    # ⚡ [PARTEA A] COLECTARE REPO-URI TERȚIARE ȘI CHEI GPG (Ex: VS Code)
+    # ----------------------------------------------------------------------
+    echo "55"; echo "# Salvare surse software terțiare și chei GPG..."
+    mkdir -p "$OUTPUT_DIR/surse_externe"
+    mkdir -p "$OUTPUT_DIR/chei_securitate"
+    if [ -d "/etc/apt/sources.list.d" ]; then
+        cp -r /etc/apt/sources.list.d/* "$OUTPUT_DIR/surse_externe/" 2>/dev/null || true
+    fi
+    if [ -d "/etc/apt/trusted.gpg.d" ]; then
+        cp -r /etc/apt/trusted.gpg.d/* "$OUTPUT_DIR/chei_securitate/" 2>/dev/null || true
+    fi
+    # ----------------------------------------------------------------------
 
     if command -v snap &> /dev/null; then
         snap list | awk 'NR>1 {print $1}' > "$OUTPUT_DIR/snap_sursa.txt"
@@ -59,25 +73,22 @@ mkdir -p "$OUTPUT_DIR"
         sudo crontab -u "$user" -l > "$OUTPUT_DIR/cronjobs/${user}_cron" 2>/dev/null
     done < "$OUTPUT_DIR/utilizatori_legitimi.txt"
 
-    echo "85"; echo "# Sincronizare directoare /home (Toți utilizatorii)..."
-    # Folosim sudo rsync pentru a putea citi fișierele tuturor utilizatorilor (gabi, ana, etc.)
-    sudo rsync -avz --progress /home/ "${DEST_USER}@${DEST_IP}:/tmp/home_sursa/" > "$OUTPUT_DIR/rsync_log.txt" 2>&1
+    echo "85"; echo "# Sincronizare directoare /home (Păstrare permisiuni intacte)..."
+    # Modificat: Trimitem DIRECT în /home/ pe Destinație pentru a lăsa rsync să mențină proprietarii nativ
+    sudo rsync -avz --progress /home/ "${DEST_USER}@${DEST_IP}:/home/" > "$OUTPUT_DIR/rsync_log.txt" 2>&1
 
     echo "100"; echo "# Analiza s-a finalizat! Se pregătește aplicarea pe Destinație..."
 
 ) | zenity --progress --title="Proces Clonare Totală" --text="Inițializare..." --percentage=0 --auto-close
 
-# Trimitem folderul de configurări pe Destinație
+# Trimitem folderul de configurări/rapoarte în /tmp pe Destinație
 scp -r "$OUTPUT_DIR" "${DEST_USER}@${DEST_IP}:/tmp/"
 
 # Pornim execuția scriptului de reconstrucție pe Destinație
 zenity --info --text="Apasă OK și introdu parola în terminal pentru a porni Reconstrucția Totală pe Destinație."
 
 ssh -t "${DEST_USER}@${DEST_IP}" "
-    echo '==> [1/5] Actualizare și instalare pachete APT lipsă...'
-    sudo apt update && sudo apt install -y \$(cat /tmp/raport_clonare/pachete_lipsa.txt)
-
-    echo '==> [2/5] Recreare automată utilizatori și configurare parole...'
+    echo '==> [1/6] Recreare automată utilizatori și configurare parole...'
     while IFS=: read -r user uid home; do
         if ! id \"\$user\" &>/dev/null; then
             echo \"Creare utilizator \$user...\"
@@ -91,22 +102,37 @@ ssh -t "${DEST_USER}@${DEST_IP}" "
         fi
     done < /tmp/raport_clonare/utilizatori_legitimi.txt
 
-    echo '==> [3/5] Mutare fișiere date în directoarele /home corespunzătoare...'
-    sudo cp -r /tmp/home_sursa/* /home/
-    
-    # Corectăm permisiunile fișierelor pentru fiecare utilizator în parte
+    # ----------------------------------------------------------------------
+    # ⚡ [PARTEA B] INJECTARE REPO-URI TERȚIARE ÎNAINTE DE INSTALARE APT
+    # ----------------------------------------------------------------------
+    echo '==> [2/6] Restaurare surse terțiare și chei GPG pe Destinație...'
+    sudo cp -r /tmp/raport_clonare/surse_externe/* /etc/apt/sources.list.d/ 2>/dev/null || true
+    sudo cp -r /tmp/raport_clonare/chei_securitate/* /etc/apt/trusted.gpg.d/ 2>/dev/null || true
+
+    echo '==> Actualizare index APT cu noile surse adăugate...'
+    sudo apt update -y
+    # ----------------------------------------------------------------------
+
+    echo '==> [3/6] Instalare pachete APT lipsă (inclusiv cele din surse externe)...'
+    if [ -s /tmp/raport_clonare/pachete_lipsa.txt ]; then
+        sudo apt install -y \$(cat /tmp/raport_clonare/pachete_lipsa.txt)
+    fi
+
+    echo '==> [4/6] Asigurare și corectare finală a permisiunilor directoarelor /home...'
     while IFS=: read -r user uid home; do
-        sudo chown -R \"\$user:\$user\" \"/home/\$user\"
+        if [ -d \"/home/\$user\" ]; then
+            sudo chown -R \"\$user:\$user\" \"/home/\$user\"
+        fi
     done < /tmp/raport_clonare/utilizatori_legitimi.txt
 
-    echo '==> [4/5] Restaurare automată Cronjob-uri...'
+    echo '==> [5/6] Restaurare automată Cronjob-uri...'
     while IFS=: read -r user uid home; do
         if [ -f \"/tmp/raport_clonare/cronjobs/\${user}_cron\" ] && [ -s \"/tmp/raport_clonare/cronjobs/\${user}_cron\" ]; then
             sudo crontab -u \"\$user\" \"/tmp/raport_clonare/cronjobs/\${user}_cron\"
         fi
     done < /tmp/raport_clonare/utilizatori_legitimi.txt
 
-    echo '==> [5/5] Instalare pachete moderne (Snap & Flatpak)...'
+    echo '==> [6/6] Instalare pachete moderne (Snap & Flatpak)...'
     if command -v snap &>/dev/null && [ -s /tmp/raport_clonare/snap_sursa.txt ]; then
         while read -r snap_pkg; do
             [ \"\$snap_pkg\" = \"code\" ] && sudo snap install --classic code || sudo snap install \"\$snap_pkg\"
